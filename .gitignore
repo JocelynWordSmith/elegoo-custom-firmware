@@ -1,0 +1,65 @@
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+*.o
+*.so
+*.a
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Calibration data (may want to version control these)
+# config/calibration/*.yaml
+
+# Large files (use Git LFS)
+*.bag
+*.db3
+*.pcd
+
+# Firmware builds
+src/**/build/
+src/**/sdkconfig
+src/**/sdkconfig.old
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+**/.pio/
+**/.pioenvs/
+**/.piolibdeps/
+
+# ESP32 build artifacts
+*.bin
+*.elf
+*.map
+**/*.bin
+**/*.elf
+**/*.map
+
+# local .env file
+.env
+
+# WiFi credentials (NEVER commit these)
+credentials.h
+**/credentials.h
+
+# local reference files and notes
+.local
+*.code-workspace
