@@ -8,7 +8,7 @@
 #include "logging.h"
 #include "http_server.h"
 
-static const char *FIRMWARE_VERSION = "0.0.1";
+const char *FIRMWARE_VERSION = "0.0.1";
 
 void setup()
 {
