@@ -74,15 +74,15 @@ const int SERVO_Y_PIN = 11;
 
 CRGB leds[NUM_LEDS];
 
-Servo servoZ; // Pan
-Servo servoY; // Tilt
+Servo servoZ;         // Pan
+Servo servoY;         // Tilt
 int motorSpeed = 150; // Global speed setting (0-255)
 
 // Current state tracking
-int currentLeftSpeed = 0;   // -255 to 255
-int currentRightSpeed = 0;  // -255 to 255
-int currentPan = 90;        // servo angle
-int currentTilt = 90;       // servo angle
+int currentLeftSpeed = 0;  // -255 to 255
+int currentRightSpeed = 0; // -255 to 255
+int currentPan = 90;       // servo angle
+int currentTilt = 90;      // servo angle
 uint8_t currentLedR = 0;
 uint8_t currentLedG = 0;
 uint8_t currentLedB = 0;
@@ -107,8 +107,8 @@ MPUData getMPUData();
 // battery
 float getBatteryVoltage();
 // JSON parser
-void processCommand(const char* cmd);
-int getJsonInt(const char* cmd, const char *field, int defaultVal = 0);
+void processCommand(const char *cmd);
+int getJsonInt(const char *cmd, const char *field, int defaultVal = 0);
 
 void setup()
 {
@@ -148,28 +148,6 @@ void setup()
   pinMode(ECHO, INPUT);
 }
 
-
-// N	Command	          Parameters
-// 1	Ping              -
-// 2	Forward	          D1=speed (optional)
-// 3	Backward	        D1=speed (optional)
-// 4	Turn left	        D1=speed (optional)
-// 5	Turn right	      D1=speed (optional)
-// 6	Stop	            -
-// 7	Tank control	    D1=left (-255 to 255), D2=right
-// 8	Set default speed D1=speed (0-255)
-// 10	Get distance	    -
-// 11	Get IR readings	  -
-// 12	Get MPU data	    -
-// 13	Get battery	      -
-// 20	Set LED color	    D1=R, D2=G, D3=B
-// 21	Set brightness	  D1=brightness
-// 30	Pan servo	        D1=angle (0-180)
-// 31	Tilt servo	      D1=angle (0-180)
-// 100	Get all sensors	  -
-// 101	Get current state -
-// 102	Set watchdog	    D1=timeout_ms (0=disable)
-
 char inputBuffer[64];
 int bufferIndex = 0;
 
@@ -207,20 +185,21 @@ void loop()
 }
 
 // Helper to extract integer value from JSON field
-int getJsonInt(const char* cmd, const char *field, int defaultVal = 0)
+int getJsonInt(const char *cmd, const char *field, int defaultVal = 0)
 {
   // Find field in string - returns pointer to start of match, or NULL
-  const char* found = strstr(cmd, field);
-  if (!found) return defaultVal;
+  const char *found = strstr(cmd, field);
+  if (!found)
+    return defaultVal;
 
   // Move pointer past the field name to where the number starts
-  const char* start = found + strlen(field);
+  const char *start = found + strlen(field);
 
   // atoi converts string to int, automatically stops at comma/brace/etc
   return atoi(start);
 }
 
-void processCommand(const char* cmd)
+void processCommand(const char *cmd)
 {
   int n = getJsonInt(cmd, "\"N\":", -1);
   if (n == -1)
@@ -337,14 +316,18 @@ void processCommand(const char* cmd)
   {
     MPUData mpu = getMPUData();
     Serial.print("{\"accel\":[");
-    Serial.print(mpu.ax); Serial.print(",");
-    Serial.print(mpu.ay); Serial.print(",");
+    Serial.print(mpu.ax);
+    Serial.print(",");
+    Serial.print(mpu.ay);
+    Serial.print(",");
     Serial.print(mpu.az);
     Serial.print("],\"temp\":");
     Serial.print(mpu.tempC, 2);
     Serial.print(",\"gyro\":[");
-    Serial.print(mpu.gx); Serial.print(",");
-    Serial.print(mpu.gy); Serial.print(",");
+    Serial.print(mpu.gx);
+    Serial.print(",");
+    Serial.print(mpu.gy);
+    Serial.print(",");
     Serial.print(mpu.gz);
     Serial.println("]}");
     break;
@@ -366,8 +349,10 @@ void processCommand(const char* cmd)
     leds[0] = CRGB(d1, d2, d3);
     FastLED.show();
     Serial.print("{\"led\":[");
-    Serial.print(d1); Serial.print(",");
-    Serial.print(d2); Serial.print(",");
+    Serial.print(d1);
+    Serial.print(",");
+    Serial.print(d2);
+    Serial.print(",");
     Serial.print(d3);
     Serial.println("]}");
     break;
@@ -407,16 +392,22 @@ void processCommand(const char* cmd)
     Serial.print("{\"distance\":");
     Serial.print(dist);
     Serial.print(",\"ir\":[");
-    Serial.print(ir.left); Serial.print(",");
-    Serial.print(ir.middle); Serial.print(",");
+    Serial.print(ir.left);
+    Serial.print(",");
+    Serial.print(ir.middle);
+    Serial.print(",");
     Serial.print(ir.right);
     Serial.print("],\"accel\":[");
-    Serial.print(mpu.ax); Serial.print(",");
-    Serial.print(mpu.ay); Serial.print(",");
+    Serial.print(mpu.ax);
+    Serial.print(",");
+    Serial.print(mpu.ay);
+    Serial.print(",");
     Serial.print(mpu.az);
     Serial.print("],\"gyro\":[");
-    Serial.print(mpu.gx); Serial.print(",");
-    Serial.print(mpu.gy); Serial.print(",");
+    Serial.print(mpu.gx);
+    Serial.print(",");
+    Serial.print(mpu.gy);
+    Serial.print(",");
     Serial.print(mpu.gz);
     Serial.print("],\"temp\":");
     Serial.print(mpu.tempC, 1);
@@ -428,14 +419,18 @@ void processCommand(const char* cmd)
   case 101: // Get current state
   {
     Serial.print("{\"motors\":[");
-    Serial.print(currentLeftSpeed); Serial.print(",");
+    Serial.print(currentLeftSpeed);
+    Serial.print(",");
     Serial.print(currentRightSpeed);
     Serial.print("],\"servos\":[");
-    Serial.print(currentPan); Serial.print(",");
+    Serial.print(currentPan);
+    Serial.print(",");
     Serial.print(currentTilt);
     Serial.print("],\"led\":[");
-    Serial.print(currentLedR); Serial.print(",");
-    Serial.print(currentLedG); Serial.print(",");
+    Serial.print(currentLedR);
+    Serial.print(",");
+    Serial.print(currentLedG);
+    Serial.print(",");
     Serial.print(currentLedB);
     Serial.print("],\"brightness\":");
     Serial.print(currentBrightness);
