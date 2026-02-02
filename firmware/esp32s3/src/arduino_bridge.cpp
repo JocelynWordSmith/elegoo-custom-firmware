@@ -91,3 +91,42 @@ void arduinoBridgeLoop()
     lastHeartbeat = now;
   }
 }
+
+bool arduinoBridgeQuery(const char *cmd, char *response, size_t maxLen, unsigned long timeoutMs)
+{
+  // clear any pending data
+  while (Serial1.available())
+  {
+    Serial1.read();
+  }
+
+  // send command
+  Serial1.println(cmd);
+
+  // wait for response
+  unsigned long start = millis();
+  size_t idx = 0;
+
+  while (millis() - start < timeoutMs)
+  {
+    if (Serial1.available())
+    {
+      char c = Serial1.read();
+      if (c == '\n' || c == '\r')
+      {
+        if (idx > 0)
+        {
+          response[idx] = '\0';
+          return true;
+        }
+      }
+      else if (idx < maxLen - 1)
+      {
+        response[idx++] = c;
+      }
+    }
+  }
+
+  response[0] = '\0';
+  return false;
+}

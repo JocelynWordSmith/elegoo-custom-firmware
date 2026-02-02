@@ -3,6 +3,7 @@
 #include "esp_http_server.h"
 #include "http_server.h"
 #include "camera_handlers.h"
+#include "arduino_bridge.h"
 #include "logging.h"
 
 static httpd_handle_t server = NULL;
@@ -37,6 +38,40 @@ static esp_err_t statusHandler(httpd_req_t *req)
 
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, json, strlen(json));
+}
+
+// handler for all sensors endpoint (queries Arduino)
+static esp_err_t sensorsHandler(httpd_req_t *req)
+{
+  char response[256];
+
+  if (arduinoBridgeQuery("{\"N\":100}", response, sizeof(response)))
+  {
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, response, strlen(response));
+  }
+  else
+  {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Arduino timeout");
+    return ESP_FAIL;
+  }
+}
+
+// handler for current state endpoint (queries Arduino)
+static esp_err_t stateHandler(httpd_req_t *req)
+{
+  char response[256];
+
+  if (arduinoBridgeQuery("{\"N\":101}", response, sizeof(response)))
+  {
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, response, strlen(response));
+  }
+  else
+  {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Arduino timeout");
+    return ESP_FAIL;
+  }
 }
 
 void startServer()
@@ -93,6 +128,20 @@ void startServer()
         .handler = logsHandler,
         .user_ctx = NULL};
     httpd_register_uri_handler(server, &logs_uri);
+
+    httpd_uri_t sensors_uri = {
+        .uri = "/sensors",
+        .method = HTTP_GET,
+        .handler = sensorsHandler,
+        .user_ctx = NULL};
+    httpd_register_uri_handler(server, &sensors_uri);
+
+    httpd_uri_t state_uri = {
+        .uri = "/state",
+        .method = HTTP_GET,
+        .handler = stateHandler,
+        .user_ctx = NULL};
+    httpd_register_uri_handler(server, &state_uri);
 
     addLog("HTTP server started on port 80");
   }

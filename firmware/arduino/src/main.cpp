@@ -49,6 +49,14 @@ const int IR_LEFT = A2;   // left IR sensor
 const int IR_MIDDLE = A1; // middle IR sensor
 const int IR_RIGHT = A0;  // right IR sensor
 //
+// Battery voltage pin
+//
+// Elegoo shield has voltage divider on A3
+// 2x 18650 = 7.4V nominal (6.0V empty, 8.4V full)
+// Voltage divider ratio assumed 1:2 (needs calibration)
+const int BATTERY_PIN = A3;
+const float BATTERY_DIVIDER_RATIO = 2.0; // adjust based on actual divider
+//
 // MPU-6050 pins (I2C)
 //
 // const int MPU_SDA = A4; // I2C data
@@ -70,6 +78,20 @@ Servo servoZ; // Pan
 Servo servoY; // Tilt
 int motorSpeed = 150; // Global speed setting (0-255)
 
+// Current state tracking
+int currentLeftSpeed = 0;   // -255 to 255
+int currentRightSpeed = 0;  // -255 to 255
+int currentPan = 90;        // servo angle
+int currentTilt = 90;       // servo angle
+uint8_t currentLedR = 0;
+uint8_t currentLedG = 0;
+uint8_t currentLedB = 0;
+uint8_t currentBrightness = 50;
+
+// Motor watchdog
+unsigned long lastMotorCommand = 0;
+unsigned long watchdogTimeout = 0; // 0 = disabled
+
 // motor control
 void forward(int speed);
 void backward(int speed);
@@ -82,6 +104,8 @@ int getDistance();
 IRLineReadData getIRLineReadData();
 // MPU-6050
 MPUData getMPUData();
+// battery
+float getBatteryVoltage();
 // JSON parser
 void processCommand(const char* cmd);
 int getJsonInt(const char* cmd, const char *field, int defaultVal = 0);
@@ -137,16 +161,31 @@ void setup()
 // 10	Get distance	    -
 // 11	Get IR readings	  -
 // 12	Get MPU data	    -
+// 13	Get battery	      -
 // 20	Set LED color	    D1=R, D2=G, D3=B
 // 21	Set brightness	  D1=brightness
 // 30	Pan servo	        D1=angle (0-180)
 // 31	Tilt servo	      D1=angle (0-180)
+// 100	Get all sensors	  -
+// 101	Get current state -
+// 102	Set watchdog	    D1=timeout_ms (0=disable)
 
 char inputBuffer[64];
 int bufferIndex = 0;
 
 void loop()
 {
+  // Motor watchdog - stop motors if timeout exceeded
+  if (watchdogTimeout > 0 && (currentLeftSpeed != 0 || currentRightSpeed != 0))
+  {
+    if (millis() - lastMotorCommand > watchdogTimeout)
+    {
+      stop();
+      currentLeftSpeed = 0;
+      currentRightSpeed = 0;
+    }
+  }
+
   if (Serial.available())
   {
     char c = Serial.read();
@@ -203,23 +242,49 @@ void processCommand(const char* cmd)
 
   // === Motor Control ===
   case 2: // Forward (D1=speed, optional)
-    forward(d1 > 0 ? d1 : motorSpeed);
+  {
+    int spd = d1 > 0 ? d1 : motorSpeed;
+    forward(spd);
+    currentLeftSpeed = spd;
+    currentRightSpeed = spd;
+    lastMotorCommand = millis();
     Serial.println("{\"cmd\":\"forward\"}");
     break;
+  }
   case 3: // Backward
-    backward(d1 > 0 ? d1 : motorSpeed);
+  {
+    int spd = d1 > 0 ? d1 : motorSpeed;
+    backward(spd);
+    currentLeftSpeed = -spd;
+    currentRightSpeed = -spd;
+    lastMotorCommand = millis();
     Serial.println("{\"cmd\":\"backward\"}");
     break;
+  }
   case 4: // Turn left
-    turnLeft(d1 > 0 ? d1 : motorSpeed);
+  {
+    int spd = d1 > 0 ? d1 : motorSpeed;
+    turnLeft(spd);
+    currentLeftSpeed = -spd;
+    currentRightSpeed = spd;
+    lastMotorCommand = millis();
     Serial.println("{\"cmd\":\"left\"}");
     break;
+  }
   case 5: // Turn right
-    turnRight(d1 > 0 ? d1 : motorSpeed);
+  {
+    int spd = d1 > 0 ? d1 : motorSpeed;
+    turnRight(spd);
+    currentLeftSpeed = spd;
+    currentRightSpeed = -spd;
+    lastMotorCommand = millis();
     Serial.println("{\"cmd\":\"right\"}");
     break;
+  }
   case 6: // Stop
     stop();
+    currentLeftSpeed = 0;
+    currentRightSpeed = 0;
     Serial.println("{\"cmd\":\"stop\"}");
     break;
   case 7: // Tank control: D1=left(-255 to 255), D2=right(-255 to 255)
@@ -230,6 +295,9 @@ void processCommand(const char* cmd)
     // Right motor
     digitalWrite(BIN1, d2 >= 0 ? HIGH : LOW);
     analogWrite(PWMB, abs(d2));
+    currentLeftSpeed = d1;
+    currentRightSpeed = d2;
+    lastMotorCommand = millis();
     Serial.print("{\"tank\":[");
     Serial.print(d1);
     Serial.print(",");
@@ -281,9 +349,20 @@ void processCommand(const char* cmd)
     Serial.println("]}");
     break;
   }
+  case 13: // Get battery voltage
+  {
+    float voltage = getBatteryVoltage();
+    Serial.print("{\"battery\":");
+    Serial.print(voltage, 2);
+    Serial.println("}");
+    break;
+  }
 
   // === LED ===
   case 20: // Set LED color: D1=R, D2=G, D3=B (0-255 each)
+    currentLedR = d1;
+    currentLedG = d2;
+    currentLedB = d3;
     leds[0] = CRGB(d1, d2, d3);
     FastLED.show();
     Serial.print("{\"led\":[");
@@ -293,7 +372,8 @@ void processCommand(const char* cmd)
     Serial.println("]}");
     break;
   case 21: // Set LED brightness: D1=brightness (0-255)
-    FastLED.setBrightness(constrain(d1, 0, 255));
+    currentBrightness = constrain(d1, 0, 255);
+    FastLED.setBrightness(currentBrightness);
     FastLED.show();
     Serial.print("{\"brightness\":");
     Serial.print(d1);
@@ -302,15 +382,74 @@ void processCommand(const char* cmd)
 
   // === Servos ===
   case 30: // Pan servo: D1=angle (0-180)
-    servoZ.write(constrain(d1, 0, 180));
+    currentPan = constrain(d1, 0, 180);
+    servoZ.write(currentPan);
     Serial.print("{\"pan\":");
-    Serial.print(d1);
+    Serial.print(currentPan);
     Serial.println("}");
     break;
   case 31: // Tilt servo: D1=angle (0-180)
-    servoY.write(constrain(d1, 0, 180));
+    currentTilt = constrain(d1, 0, 180);
+    servoY.write(currentTilt);
     Serial.print("{\"tilt\":");
-    Serial.print(d1);
+    Serial.print(currentTilt);
+    Serial.println("}");
+    break;
+
+  // === Status ===
+  case 100: // Get all sensors
+  {
+    int dist = getDistance();
+    IRLineReadData ir = getIRLineReadData();
+    MPUData mpu = getMPUData();
+    float batt = getBatteryVoltage();
+
+    Serial.print("{\"distance\":");
+    Serial.print(dist);
+    Serial.print(",\"ir\":[");
+    Serial.print(ir.left); Serial.print(",");
+    Serial.print(ir.middle); Serial.print(",");
+    Serial.print(ir.right);
+    Serial.print("],\"accel\":[");
+    Serial.print(mpu.ax); Serial.print(",");
+    Serial.print(mpu.ay); Serial.print(",");
+    Serial.print(mpu.az);
+    Serial.print("],\"gyro\":[");
+    Serial.print(mpu.gx); Serial.print(",");
+    Serial.print(mpu.gy); Serial.print(",");
+    Serial.print(mpu.gz);
+    Serial.print("],\"temp\":");
+    Serial.print(mpu.tempC, 1);
+    Serial.print(",\"battery\":");
+    Serial.print(batt, 2);
+    Serial.println("}");
+    break;
+  }
+  case 101: // Get current state
+  {
+    Serial.print("{\"motors\":[");
+    Serial.print(currentLeftSpeed); Serial.print(",");
+    Serial.print(currentRightSpeed);
+    Serial.print("],\"servos\":[");
+    Serial.print(currentPan); Serial.print(",");
+    Serial.print(currentTilt);
+    Serial.print("],\"led\":[");
+    Serial.print(currentLedR); Serial.print(",");
+    Serial.print(currentLedG); Serial.print(",");
+    Serial.print(currentLedB);
+    Serial.print("],\"brightness\":");
+    Serial.print(currentBrightness);
+    Serial.print(",\"speed\":");
+    Serial.print(motorSpeed);
+    Serial.print(",\"watchdog\":");
+    Serial.print(watchdogTimeout);
+    Serial.println("}");
+    break;
+  }
+  case 102: // Set watchdog timeout: D1=timeout_ms (0=disable)
+    watchdogTimeout = d1;
+    Serial.print("{\"watchdog\":");
+    Serial.print(watchdogTimeout);
     Serial.println("}");
     break;
 
@@ -359,6 +498,15 @@ IRLineReadData getIRLineReadData()
   int right = analogRead(IR_RIGHT);
 
   return IRLineReadData{left, middle, right};
+}
+
+float getBatteryVoltage()
+{
+  int raw = analogRead(BATTERY_PIN);
+  // Convert ADC reading to voltage (5V reference, 10-bit ADC)
+  float adcVoltage = raw * (5.0 / 1023.0);
+  // Apply voltage divider ratio to get actual battery voltage
+  return adcVoltage * BATTERY_DIVIDER_RATIO;
 }
 
 int getDistance()
