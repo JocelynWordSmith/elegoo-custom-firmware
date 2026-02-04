@@ -4,7 +4,7 @@
 
 #define ARDUINO_RX_PIN 3
 #define ARDUINO_TX_PIN 40
-#define ARDUINO_BAUD 9600
+#define ARDUINO_BAUD 115200
 #define CONTROL_PORT 100
 #define HEARTBEAT_INTERVAL 10000
 
@@ -12,8 +12,14 @@ static WiFiServer controlServer(CONTROL_PORT);
 static WiFiClient controlClient;
 static unsigned long lastHeartbeat = 0;
 
+// Mutex to protect Serial1 access from concurrent HTTP queries and TCP relay
+static SemaphoreHandle_t serialMutex = NULL;
+
 void arduinoBridgeInit()
 {
+  // create mutex for serial access
+  serialMutex = xSemaphoreCreateMutex();
+
   // initialize uart to arduino
   Serial1.begin(ARDUINO_BAUD, SERIAL_8N1, ARDUINO_RX_PIN, ARDUINO_TX_PIN);
 
@@ -39,48 +45,54 @@ void arduinoBridgeLoop()
 
   if (!controlClient || !controlClient.connected())
   {
-    // No client - handle factory deletion
-    if (Serial1.available())
+    // No client - handle factory detection
+    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(10)) == pdTRUE)
     {
-      String msg = Serial1.readStringUntil('\n');
-      msg.trim();
+      if (Serial1.available())
+      {
+        String msg = Serial1.readStringUntil('\n');
+        msg.trim();
 
-      if (msg == "{BT_detection}")
-      {
-        Serial.println("{BT_OK}");
+        if (msg == "{BT_detection}")
+        {
+          Serial.println("{BT_OK}");
+        }
+        else if (msg == "{WA_detection}")
+        {
+          Serial.println("{ESP32S3_CAM}");
+        }
       }
-      else if (msg == "{WA_detection}")
-      {
-        Serial.println("{ESP32S3_CAM}");
-      }
+      xSemaphoreGive(serialMutex);
     }
     return;
   }
 
-  // client connected - relay data
-
-  // TCP -> UART
-  while (controlClient.available())
+  // client connected - relay data (with mutex protection)
+  if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(10)) == pdTRUE)
   {
-    char c = controlClient.read();
-    Serial1.write(c);
-
-    if (c == '\n')
+    // TCP -> UART (buffered)
+    if (controlClient.available())
     {
-      Serial.println("TX to arduino");
+      uint8_t buf[128];
+      int len = controlClient.read(buf, sizeof(buf));
+      if (len > 0)
+      {
+        Serial1.write(buf, len);
+      }
     }
-  }
 
-  // UART -> TCP
-  while (Serial1.available())
-  {
-    char c = Serial1.read();
-    controlClient.write(c);
-
-    if (c == '\n')
+    // UART -> TCP (buffered)
+    if (Serial1.available())
     {
-      Serial.println("RX from arduino");
+      uint8_t buf[128];
+      int len = Serial1.read(buf, sizeof(buf));
+      if (len > 0)
+      {
+        controlClient.write(buf, len);
+      }
     }
+
+    xSemaphoreGive(serialMutex);
   }
 
   // send heartbeat
@@ -92,8 +104,20 @@ void arduinoBridgeLoop()
   }
 }
 
+bool arduinoBridgeClientConnected()
+{
+  return controlClient && controlClient.connected();
+}
+
 bool arduinoBridgeQuery(const char *cmd, char *response, size_t maxLen, unsigned long timeoutMs)
 {
+  // Take mutex - wait up to timeoutMs
+  if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE)
+  {
+    response[0] = '\0';
+    return false;
+  }
+
   // clear any pending data
   while (Serial1.available())
   {
@@ -117,6 +141,7 @@ bool arduinoBridgeQuery(const char *cmd, char *response, size_t maxLen, unsigned
         if (idx > 0)
         {
           response[idx] = '\0';
+          xSemaphoreGive(serialMutex);
           return true;
         }
       }
@@ -128,5 +153,6 @@ bool arduinoBridgeQuery(const char *cmd, char *response, size_t maxLen, unsigned
   }
 
   response[0] = '\0';
+  xSemaphoreGive(serialMutex);
   return false;
 }

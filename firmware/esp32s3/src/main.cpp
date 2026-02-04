@@ -10,10 +10,23 @@
 
 const char *FIRMWARE_VERSION = "0.0.1";
 
+// Arduino bridge runs on Core 1 to ensure motor commands
+// are never blocked by camera/HTTP operations on Core 0
+static TaskHandle_t bridgeTaskHandle = NULL;
+
+void bridgeTask(void *param)
+{
+  for (;;)
+  {
+    arduinoBridgeLoop();
+    vTaskDelay(1);  // yield to other Core 1 tasks
+  }
+}
+
 void setup()
 {
   Serial.begin(115200);
-  delay(3000); // long delay here so USB can enumerate/monitor can connect
+  delay(1000); // brief delay for USB enumeration
 
   addLog("ESP32-S3 starting...");
   Serial.print("CPU Frequency: ");
@@ -41,7 +54,7 @@ void setup()
   config.pin_sccb_scl = SIOC_GPIO_NUM;       // I2C clock for camera control
   config.pin_pwdn = PWDN_GPIO_NUM;           // power down pin (-1 = unused)
   config.pin_reset = RESET_GPIO_NUM;         // hardware reset pin (-1 = unused)
-  config.xclk_freq_hz = 20000000;            // 20MHz
+  config.xclk_freq_hz = 24000000;            // 24MHz - faster pixel clock
   config.frame_size = FRAMESIZE_UXGA;        // init with largest for buffer allocation
   config.pixel_format = PIXFORMAT_JPEG;      // hardware jpeg compression
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY; // wait for buffer to be free
@@ -118,8 +131,17 @@ void setup()
     addLog("Wifi connection failed");
   }
 
-  // start arduino bridge
+  // start arduino bridge on Core 1 (Core 0 handles WiFi/HTTP/camera)
   arduinoBridgeInit();
+  xTaskCreatePinnedToCore(
+      bridgeTask,          // function
+      "ArduinoBridge",     // name
+      4096,                // stack size
+      NULL,                // params
+      2,                   // priority (higher than loop)
+      &bridgeTaskHandle,   // handle
+      1                    // Core 1
+  );
 
   // initialize OTA
   ArduinoOTA.setHostname(otaHostName);
@@ -155,9 +177,25 @@ void setup()
   addLog(buf);
 }
 
+// Track WiFi state for reconnection
+static unsigned long lastWifiCheck = 0;
+static const unsigned long WIFI_CHECK_INTERVAL = 10000;  // check every 10s
+
 void loop()
 {
   ArduinoOTA.handle();
-  arduinoBridgeLoop();
-  delay(1);
+
+  // WiFi auto-reconnect
+  unsigned long now = millis();
+  if (now - lastWifiCheck > WIFI_CHECK_INTERVAL)
+  {
+    lastWifiCheck = now;
+    if (WiFi.status() != WL_CONNECTED)
+    {
+      addLog("WiFi disconnected, reconnecting...");
+      WiFi.reconnect();
+    }
+  }
+
+  delay(10);
 }

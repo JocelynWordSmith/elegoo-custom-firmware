@@ -10,24 +10,24 @@
 #define PART_BOUNDARY "123456789000000000000987654321"
 static const char *STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
 static const char *STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
-static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+static const char *STREAM_PART = "Content-Type: image/jpeg\r\nX-Timestamp: %lu\r\nContent-Length: %u\r\n\r\n";
 
-static bool streamActive = false;
+int activeStreams = 0;
+static const int MAX_STREAMS = 3;
 
 esp_err_t streamHandler(httpd_req_t *req)
 {
-  // only allow one stream at a time
-  if (streamActive)
+  if (activeStreams >= MAX_STREAMS)
   {
     httpd_resp_set_status(req, "503 Service Unavailable");
-    httpd_resp_send(req, "Stream already active", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send(req, "Max streams reached", HTTPD_RESP_USE_STRLEN);
     return ESP_FAIL;
   }
-  streamActive = true;
+  activeStreams++;
 
   camera_fb_t *fb = NULL;
   esp_err_t res = ESP_OK;
-  char part_buf[64];
+  char part_buf[96];
 
   // set content type for multipart stream
   res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
@@ -59,8 +59,8 @@ esp_err_t streamHandler(httpd_req_t *req)
       break;
     }
 
-    // send part header with content length
-    size_t hlen = snprintf(part_buf, sizeof(part_buf), STREAM_PART, fb->len);
+    // send part header with timestamp and content length
+    size_t hlen = snprintf(part_buf, sizeof(part_buf), STREAM_PART, millis(), fb->len);
     res = httpd_resp_send_chunk(req, part_buf, hlen);
     if (res != ESP_OK)
     {
@@ -77,12 +77,12 @@ esp_err_t streamHandler(httpd_req_t *req)
       break;
     }
 
-    // yield to RTOS - helps detect client disconnect faster
-    delay(10);
+    // yield to RTOS
+    delay(1);
   }
 
   addLog("Stream ended");
-  streamActive = false;
+  activeStreams--;
   return res;
 }
 

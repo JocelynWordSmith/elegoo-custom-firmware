@@ -8,8 +8,16 @@
 #include "logging.h"
 
 extern const char *FIRMWARE_VERSION;
+extern int activeStreams;  // from camera_handlers.cpp
 
 static httpd_handle_t server = NULL;
+
+// helper: set common JSON response headers (CORS + content type)
+static void setJsonResponseHeaders(httpd_req_t *req)
+{
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+}
 
 // framesize names for /info endpoint
 static const char *framesizeNames[] = {
@@ -44,49 +52,65 @@ static esp_err_t indexHandler(httpd_req_t *req)
 // handler for status endpoint
 static esp_err_t statusHandler(httpd_req_t *req)
 {
-  char json[256];
+  char json[384];
   snprintf(json, sizeof(json),
-           "{\"uptime_ms\":%lu,\"free_heap\":%u,\"wifi_rssi\":%d}",
+           "{"
+           "\"uptime_ms\":%lu,"
+           "\"free_heap\":%u,"
+           "\"min_free_heap\":%u,"
+           "\"free_psram\":%u,"
+           "\"wifi_rssi\":%d,"
+           "\"active_streams\":%d,"
+           "\"cpu_freq_mhz\":%u"
+           "}",
            millis(),
            ESP.getFreeHeap(),
-           WiFi.RSSI());
+           ESP.getMinFreeHeap(),
+           ESP.getFreePsram(),
+           WiFi.RSSI(),
+           activeStreams,
+           getCpuFrequencyMhz());
 
-  httpd_resp_set_type(req, "application/json");
+  setJsonResponseHeaders(req);
   return httpd_resp_send(req, json, strlen(json));
+}
+
+// helper: query Arduino and wrap response with ESP32 timestamp
+// Takes Arduino JSON like {"distance":42,...} and returns
+// {"ts":12345,"data":{"distance":42,...}}
+static esp_err_t queryArduinoHandler(httpd_req_t *req, const char *cmd)
+{
+  char arduinoResponse[256];
+  unsigned long queryStart = millis();
+
+  if (arduinoBridgeQuery(cmd, arduinoResponse, sizeof(arduinoResponse)))
+  {
+    unsigned long queryEnd = millis();
+    char wrapped[384];
+    snprintf(wrapped, sizeof(wrapped),
+             "{\"ts\":%lu,\"latency_ms\":%lu,\"data\":%s}",
+             queryStart, queryEnd - queryStart, arduinoResponse);
+
+    setJsonResponseHeaders(req);
+    return httpd_resp_send(req, wrapped, strlen(wrapped));
+  }
+  else
+  {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Arduino timeout");
+    return ESP_FAIL;
+  }
 }
 
 // handler for all sensors endpoint (queries Arduino)
 static esp_err_t sensorsHandler(httpd_req_t *req)
 {
-  char response[256];
-
-  if (arduinoBridgeQuery("{\"N\":100}", response, sizeof(response)))
-  {
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, response, strlen(response));
-  }
-  else
-  {
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Arduino timeout");
-    return ESP_FAIL;
-  }
+  return queryArduinoHandler(req, "{\"N\":100}");
 }
 
 // handler for current state endpoint (queries Arduino)
 static esp_err_t stateHandler(httpd_req_t *req)
 {
-  char response[256];
-
-  if (arduinoBridgeQuery("{\"N\":101}", response, sizeof(response)))
-  {
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, response, strlen(response));
-  }
-  else
-  {
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Arduino timeout");
-    return ESP_FAIL;
-  }
+  return queryArduinoHandler(req, "{\"N\":101}");
 }
 
 // handler for info endpoint (firmware, wifi, camera settings)
@@ -136,7 +160,7 @@ static esp_err_t infoHandler(httpd_req_t *req)
            ESP.getFreeHeap(),
            ESP.getFreePsram());
 
-  httpd_resp_set_type(req, "application/json");
+  setJsonResponseHeaders(req);
   return httpd_resp_send(req, json, strlen(json));
 }
 

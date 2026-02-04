@@ -167,7 +167,7 @@ Default OTA password is set in `credentials.h`.
       │  ├─ OV2640 Camera       │
       │  └─ OTA Updates         │
       └────────────┬────────────┘
-                   │ UART (9600 baud)
+                   │ UART (115200 baud)
       ┌────────────┴────────────┐
       │     Arduino Uno R3      │
       │  ├─ TB6612FNG Motors    │

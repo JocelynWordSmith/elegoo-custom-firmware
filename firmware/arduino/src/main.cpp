@@ -112,7 +112,7 @@ int getJsonInt(const char *cmd, const char *field, int defaultVal = 0);
 
 void setup()
 {
-  Serial.begin(9600);
+  Serial.begin(115200);
   // setup fastled
   FastLED.addLeds<WS2812B, LED_DATA_PIN, GRB>(leds, NUM_LEDS);
   FastLED.setBrightness(50); // 0-255
@@ -384,12 +384,15 @@ void processCommand(const char *cmd)
   // === Status ===
   case 100: // Get all sensors
   {
+    unsigned long t = millis();
     int dist = getDistance();
     IRLineReadData ir = getIRLineReadData();
     MPUData mpu = getMPUData();
     float batt = getBatteryVoltage();
 
-    Serial.print("{\"distance\":");
+    Serial.print("{\"ts\":");
+    Serial.print(t);
+    Serial.print(",\"distance\":");
     Serial.print(dist);
     Serial.print(",\"ir\":[");
     Serial.print(ir.left);
@@ -418,7 +421,9 @@ void processCommand(const char *cmd)
   }
   case 101: // Get current state
   {
-    Serial.print("{\"motors\":[");
+    Serial.print("{\"ts\":");
+    Serial.print(millis());
+    Serial.print(",\"motors\":[");
     Serial.print(currentLeftSpeed);
     Serial.print(",");
     Serial.print(currentRightSpeed);
