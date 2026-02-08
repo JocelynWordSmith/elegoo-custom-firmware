@@ -117,11 +117,6 @@ void setup()
     snprintf(msg, sizeof(msg), "Wifi connected, IP: %s", WiFi.localIP().toString().c_str());
     addLog(msg);
 
-    // reduce TX power to lower heat (default is 19.5dBm)
-    // TODO: remove when mounting has better thermal management
-    WiFi.setTxPower(WIFI_POWER_11dBm);
-    addLog("WiFi TX power reduced to 11dBm (thermal)");
-
     addLog("Starting server...");
     startServer();
   }
