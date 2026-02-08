@@ -20,6 +20,7 @@ struct MPUData
   int16_t gx;  // Gyroscope
   int16_t gy;
   int16_t gz;
+  bool valid;  // true if read succeeded
 };
 
 //
@@ -55,7 +56,7 @@ const int IR_RIGHT = A0;  // right IR sensor
 // 2x 18650 = 7.4V nominal (6.0V empty, 8.4V full)
 // Voltage divider ratio assumed 1:2 (needs calibration)
 const int BATTERY_PIN = A3;
-const float BATTERY_DIVIDER_RATIO = 2.0; // adjust based on actual divider
+float BATTERY_DIVIDER_RATIO = 2.0; // adjust based on actual divider
 //
 // MPU-6050 pins (I2C)
 //
@@ -78,6 +79,13 @@ Servo servoZ;         // Pan
 Servo servoY;         // Tilt
 int motorSpeed = 150; // Global speed setting (0-255)
 
+// Motor bias correction (for drift compensation)
+float leftMotorBias = 1.0;  // 0.8-1.2 typical
+float rightMotorBias = 1.0;
+
+// IR line tracking threshold
+int irThreshold = 600; // Adjust based on surface (black ~300, white ~900)
+
 // Current state tracking
 int currentLeftSpeed = 0;  // -255 to 255
 int currentRightSpeed = 0; // -255 to 255
@@ -92,17 +100,22 @@ uint8_t currentBrightness = 50;
 unsigned long lastMotorCommand = 0;
 unsigned long watchdogTimeout = 0; // 0 = disabled
 
+// MPU-6050 status
+bool mpuPresent = false;
+
 // motor control
 void forward(int speed);
 void backward(int speed);
 void turnLeft(int speed);
 void turnRight(int speed);
 void stop();
+void tankDrive(int leftSpeed, int rightSpeed); // with bias correction
 // ultrasonic sensor
 int getDistance();
 // IR line sensors
 IRLineReadData getIRLineReadData();
 // MPU-6050
+bool testMPU();
 MPUData getMPUData();
 // battery
 float getBatteryVoltage();
@@ -128,11 +141,30 @@ void setup()
   // Initialize I2C
   Wire.begin();
 
-  // Wake up MPU-6050 (it starts in sleep mode)
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x6B); // PWR_MGMT_1 register
-  Wire.write(0);    // wakr up (set to 0)
-  Wire.endTransmission(true);
+  // Test if MPU-6050 is present
+  mpuPresent = testMPU();
+  
+  if (mpuPresent) {
+    // Wake up MPU-6050 (it starts in sleep mode)
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x6B); // PWR_MGMT_1 register
+    Wire.write(0);    // wake up (set to 0)
+    Wire.endTransmission(true);
+    
+    // Flash LED green to indicate MPU is ready
+    leds[0] = CRGB(0, 255, 0);
+    FastLED.show();
+    delay(200);
+    leds[0] = CRGB(0, 0, 0);
+    FastLED.show();
+  } else {
+    // Flash LED red to indicate MPU not found
+    leds[0] = CRGB(255, 0, 0);
+    FastLED.show();
+    delay(200);
+    leds[0] = CRGB(0, 0, 0);
+    FastLED.show();
+  }
 
   // Set all motor pins as outputs
   pinMode(PWMA, OUTPUT);
@@ -268,12 +300,7 @@ void processCommand(const char *cmd)
     break;
   case 7: // Tank control: D1=left(-255 to 255), D2=right(-255 to 255)
   {
-    // Left motor
-    digitalWrite(AIN1, d1 >= 0 ? HIGH : LOW);
-    analogWrite(PWMA, abs(d1));
-    // Right motor
-    digitalWrite(BIN1, d2 >= 0 ? HIGH : LOW);
-    analogWrite(PWMB, abs(d2));
+    tankDrive(d1, d2);
     currentLeftSpeed = d1;
     currentRightSpeed = d2;
     lastMotorCommand = millis();
@@ -303,12 +330,22 @@ void processCommand(const char *cmd)
   case 11: // Get IR readings
   {
     IRLineReadData ir = getIRLineReadData();
+    bool leftOnLine = ir.left > irThreshold;
+    bool middleOnLine = ir.middle > irThreshold;
+    bool rightOnLine = ir.right > irThreshold;
+    
     Serial.print("{\"ir\":[");
     Serial.print(ir.left);
     Serial.print(",");
     Serial.print(ir.middle);
     Serial.print(",");
     Serial.print(ir.right);
+    Serial.print("],\"onLine\":[");
+    Serial.print(leftOnLine ? 1 : 0);
+    Serial.print(",");
+    Serial.print(middleOnLine ? 1 : 0);
+    Serial.print(",");
+    Serial.print(rightOnLine ? 1 : 0);
     Serial.println("]}");
     break;
   }
@@ -337,6 +374,44 @@ void processCommand(const char *cmd)
     float voltage = getBatteryVoltage();
     Serial.print("{\"battery\":");
     Serial.print(voltage, 2);
+    Serial.println("}");
+    break;
+  }
+  case 14: // Calibrate battery: D1=actual voltage * 100 (e.g., 740 = 7.40V)
+  {
+    float actualVoltage = d1 / 100.0;
+    int raw = analogRead(BATTERY_PIN);
+    float adcVoltage = raw * (5.0 / 1023.0);
+    if (adcVoltage > 0.1) { // Avoid division by zero
+      BATTERY_DIVIDER_RATIO = actualVoltage / adcVoltage;
+      Serial.print("{\"calibrated_ratio\":");
+      Serial.print(BATTERY_DIVIDER_RATIO, 3);
+      Serial.print(",\"actual\":");
+      Serial.print(actualVoltage, 2);
+      Serial.print(",\"adc\":");
+      Serial.print(adcVoltage, 2);
+      Serial.println("}");
+    } else {
+      Serial.println("{\"error\":\"voltage too low\"}");
+    }
+    break;
+  }
+  case 15: // Set motor bias: D1=left% (80-120), D2=right% (80-120)
+  {
+    leftMotorBias = constrain(d1, 80, 120) / 100.0;
+    rightMotorBias = constrain(d2, 80, 120) / 100.0;
+    Serial.print("{\"motor_bias\":[");
+    Serial.print(leftMotorBias, 2);
+    Serial.print(",");
+    Serial.print(rightMotorBias, 2);
+    Serial.println("]}");
+    break;
+  }
+  case 16: // Set IR threshold: D1=threshold (0-1023)
+  {
+    irThreshold = constrain(d1, 0, 1023);
+    Serial.print("{\"ir_threshold\":");
+    Serial.print(irThreshold);
     Serial.println("}");
     break;
   }
@@ -384,14 +459,22 @@ void processCommand(const char *cmd)
   // === Status ===
   case 100: // Get all sensors
   {
+    unsigned long startTime = micros();
     unsigned long t = millis();
     int dist = getDistance();
     IRLineReadData ir = getIRLineReadData();
     MPUData mpu = getMPUData();
     float batt = getBatteryVoltage();
+    unsigned long execTime = micros() - startTime;
+
+    bool leftOnLine = ir.left > irThreshold;
+    bool middleOnLine = ir.middle > irThreshold;
+    bool rightOnLine = ir.right > irThreshold;
 
     Serial.print("{\"ts\":");
     Serial.print(t);
+    Serial.print(",\"execUs\":");
+    Serial.print(execTime);
     Serial.print(",\"distance\":");
     Serial.print(dist);
     Serial.print(",\"ir\":[");
@@ -400,6 +483,12 @@ void processCommand(const char *cmd)
     Serial.print(ir.middle);
     Serial.print(",");
     Serial.print(ir.right);
+    Serial.print("],\"onLine\":[");
+    Serial.print(leftOnLine ? 1 : 0);
+    Serial.print(",");
+    Serial.print(middleOnLine ? 1 : 0);
+    Serial.print(",");
+    Serial.print(rightOnLine ? 1 : 0);
     Serial.print("],\"accel\":[");
     Serial.print(mpu.ax);
     Serial.print(",");
@@ -416,6 +505,8 @@ void processCommand(const char *cmd)
     Serial.print(mpu.tempC, 1);
     Serial.print(",\"battery\":");
     Serial.print(batt, 2);
+    Serial.print(",\"mpuValid\":");
+    Serial.print(mpu.valid ? 1 : 0);
     Serial.println("}");
     break;
   }
@@ -443,6 +534,16 @@ void processCommand(const char *cmd)
     Serial.print(motorSpeed);
     Serial.print(",\"watchdog\":");
     Serial.print(watchdogTimeout);
+    Serial.print(",\"motorBias\":[");
+    Serial.print(leftMotorBias, 2);
+    Serial.print(",");
+    Serial.print(rightMotorBias, 2);
+    Serial.print("],\"irThreshold\":");
+    Serial.print(irThreshold);
+    Serial.print(",\"batteryRatio\":");
+    Serial.print(BATTERY_DIVIDER_RATIO, 3);
+    Serial.print(",\"mpuPresent\":");
+    Serial.print(mpuPresent ? 1 : 0);
     Serial.println("}");
     break;
   }
@@ -460,34 +561,75 @@ void processCommand(const char *cmd)
   }
 }
 
-MPUData getMPUData()
+bool testMPU()
 {
   Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x75); // WHO_AM_I register
+  if (Wire.endTransmission(false) != 0) {
+    return false; // I2C error
+  }
+  
+  if (Wire.requestFrom(MPU_ADDR, 1, true) != 1) {
+    return false; // Failed to read
+  }
+  
+  uint8_t whoami = Wire.read();
+  return (whoami == 0x68); // MPU-6050 device ID
+}
+
+MPUData getMPUData()
+{
+  MPUData result = {0, 0, 0, 0.0, 0, 0, 0, false};
+  
+  if (!mpuPresent) {
+    return result; // Return zeros if MPU not present
+  }
+  
+  Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x3B); // starting register (ACCEL_XOUT_H)
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 14, true); // request 14 bytes
+  if (Wire.endTransmission(false) != 0) {
+    return result; // I2C error
+  }
+  
+  if (Wire.requestFrom(MPU_ADDR, 14, true) != 14) {
+    return result; // Failed to read all bytes
+  }
 
-  MPUData result;
-  // NOTE: C/C++ doesn't guarantee which Wire.read() executes first.
-  // It usually works left-to-right, but it's technically undefined.
-  // The safer way is:
-  //    int16_t high = Wire.read();
-  //    int16_t low = Wire.read();
-  //    result.ax = (high << 8) | low;
-  //
-  // read accelerometer (6 bytes)
-  result.ax = Wire.read() << 8 | Wire.read();
-  result.ay = Wire.read() << 8 | Wire.read();
-  result.az = Wire.read() << 8 | Wire.read();
-  // read temperature data
-  int16_t temperature = Wire.read() << 8 | Wire.read();
-  // convert temperature to celcius and save
+  // Read accelerometer (6 bytes) - fixed to avoid undefined behavior
+  int16_t high, low;
+  
+  high = Wire.read();
+  low = Wire.read();
+  result.ax = (high << 8) | low;
+  
+  high = Wire.read();
+  low = Wire.read();
+  result.ay = (high << 8) | low;
+  
+  high = Wire.read();
+  low = Wire.read();
+  result.az = (high << 8) | low;
+  
+  // Read temperature (2 bytes)
+  high = Wire.read();
+  low = Wire.read();
+  int16_t temperature = (high << 8) | low;
   result.tempC = (temperature / 340.0) + 36.53;
-  // read gyroscope data
-  result.gx = Wire.read() << 8 | Wire.read();
-  result.gy = Wire.read() << 8 | Wire.read();
-  result.gz = Wire.read() << 8 | Wire.read();
+  
+  // Read gyroscope (6 bytes)
+  high = Wire.read();
+  low = Wire.read();
+  result.gx = (high << 8) | low;
+  
+  high = Wire.read();
+  low = Wire.read();
+  result.gy = (high << 8) | low;
+  
+  high = Wire.read();
+  low = Wire.read();
+  result.gz = (high << 8) | low;
 
+  result.valid = true;
   return result;
 }
 
@@ -532,38 +674,41 @@ int getDistance()
 
 void forward(int speed)
 {
-  digitalWrite(AIN1, HIGH); // left forward
-  digitalWrite(BIN1, HIGH); // right forward
-  analogWrite(PWMA, speed);
-  analogWrite(PWMB, speed);
+  tankDrive(speed, speed);
 }
 
 void backward(int speed)
 {
-  digitalWrite(AIN1, LOW); // left backward
-  digitalWrite(BIN1, LOW); // right backward
-  analogWrite(PWMA, speed);
-  analogWrite(PWMB, speed);
+  tankDrive(-speed, -speed);
 }
 
 void turnLeft(int speed)
 {
-  digitalWrite(AIN1, LOW);  // left backward
-  digitalWrite(BIN1, HIGH); // right forward
-  analogWrite(PWMA, speed);
-  analogWrite(PWMB, speed);
+  tankDrive(-speed, speed); // left backward, right forward
 }
 
 void turnRight(int speed)
 {
-  digitalWrite(AIN1, HIGH); // left forward
-  digitalWrite(BIN1, LOW);  // right backward
-  analogWrite(PWMA, speed);
-  analogWrite(PWMB, speed);
+  tankDrive(speed, -speed); // left forward, right backward
 }
 
 void stop()
 {
   analogWrite(PWMA, 0);
   analogWrite(PWMB, 0);
+}
+
+void tankDrive(int leftSpeed, int rightSpeed)
+{
+  // Apply bias correction
+  int leftAdjusted = constrain((int)(leftSpeed * leftMotorBias), -255, 255);
+  int rightAdjusted = constrain((int)(rightSpeed * rightMotorBias), -255, 255);
+  
+  // Left motor
+  digitalWrite(AIN1, leftAdjusted >= 0 ? HIGH : LOW);
+  analogWrite(PWMA, abs(leftAdjusted));
+  
+  // Right motor
+  digitalWrite(BIN1, rightAdjusted >= 0 ? HIGH : LOW);
+  analogWrite(PWMB, abs(rightAdjusted));
 }

@@ -117,15 +117,18 @@ Connect via TCP for direct Arduino serial passthrough. Commands are JSON:
 | 7   | Tank Drive              | D1=left speed, D2=right speed (-255 to 255) |
 | 8   | Set Default Speed       | D1=speed                                    |
 | 10  | Get Ultrasonic Distance | -                                           |
-| 11  | Get IR Sensors          | -                                           |
+| 11  | Get IR Sensors          | - (returns raw + onLine binary)             |
 | 12  | Get IMU Data            | -                                           |
 | 13  | Get Battery Voltage     | -                                           |
+| 14  | Calibrate Battery       | D1=actual voltage × 100                     |
+| 15  | Set Motor Bias          | D1=left%, D2=right% (80-120)                |
+| 16  | Set IR Threshold        | D1=threshold (0-1023)                       |
 | 20  | Set LED Color           | D1=R, D2=G, D3=B                            |
 | 21  | Set LED Brightness      | D1=brightness                               |
 | 30  | Pan Servo               | D1=angle (0-180)                            |
 | 31  | Tilt Servo              | D1=angle (0-180)                            |
-| 100 | Get All Sensors         | -                                           |
-| 101 | Get Current State       | -                                           |
+| 100 | Get All Sensors         | - (includes execUs, onLine, mpuValid)       |
+| 101 | Get Current State       | - (includes bias, threshold, ratio)         |
 | 102 | Set Watchdog Timeout    | D1=ms (0=disable)                           |
 
 ### Example: Control via curl
