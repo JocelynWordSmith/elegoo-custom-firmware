@@ -44,6 +44,8 @@ cd firmware/arduino
 pio run -t upload
 ```
 
+Note: prior to uploading, double check the port with `pio device list`, as it can differ by OS and port. For instance on mac with a powered hub you will need to run `pio run -t upload --upload-port /dev/cu.usbserial*` or however the port registers on your machine
+
 Move the switch on the shield to `cam` for ESP32S3 integration
 
 ### 3. Upload ESP32-S3 firmware
@@ -56,6 +58,8 @@ Move the switch on the shield to `cam` for ESP32S3 integration
 cd firmware/esp32s3
 pio run -t upload
 ```
+
+Note: prior to uploading, double check the port with `pio device list`, as it can differ by OS and port. For instance on mac with a powered hub you will need to run `pio run -t upload --upload-port /dev/cu.usbmodem*` or however the port registers on your machine
 
 press `rst` to restart the module (reset by pin doesnt always work)
 
