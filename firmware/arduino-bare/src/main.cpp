@@ -72,20 +72,13 @@ uint8_t currentBrightness = 50;
 
 // Motor watchdog
 unsigned long lastMotorCommand = 0;
-unsigned long watchdogTimeout = 500; // 500ms default (was 0/disabled)
+unsigned long watchdogTimeout = 1000; // 1s default — allows ~10 missed cmds at 10Hz
 
 // MPU-6050 status
 bool mpuPresent = false;
 
-// Emergency stop config and tracking
-int stopDistanceCm = 15;          // obstacle distance threshold
-unsigned long lastEstopMs = 0;    // millis() of last estop
-unsigned int estopCount = 0;      // total estops since boot
-char estopSource[8] = "";         // "front", "test", etc.
-
 // Acceleration curve config
-int maxAccelPerTick = 10;         // max speed change per 20ms tick (0-255 range)
-float tipThresholdDeg = 25.0;     // pitch angle that limits forward acceleration
+int maxAccelPerTick = 20;         // max speed change per 20ms tick (0-255 range)
 
 // Safety loop timing
 unsigned long lastSafetyTick = 0;
@@ -99,10 +92,6 @@ unsigned long streamIntervalMs = 0; // 0 = disabled
 unsigned long lastStreamTime = 0;
 
 // Forward declarations
-void forward(int speed);
-void backward(int speed);
-void turnLeft(int speed);
-void turnRight(int speed);
 void stop();
 void tankDrive(int leftSpeed, int rightSpeed);
 int getDistance();
@@ -111,7 +100,6 @@ MPUData getMPUData();
 float getBatteryVoltage();
 void processCommand(const char *cmd);
 int getJsonInt(const char *cmd, const char *field, int defaultVal = 0);
-void doEstop(const char *source, int dist);
 
 void setup()
 {
@@ -162,53 +150,20 @@ void setup()
   pinMode(ECHO, INPUT);
 }
 
-char inputBuffer[64];
+char inputBuffer[128];
 int bufferIndex = 0;
 
 void loop()
 {
-  // === 50Hz safety loop ===
+  // === 50Hz motor ramp loop ===
   if (millis() - lastSafetyTick >= SAFETY_INTERVAL_MS) {
     lastSafetyTick = millis();
-
-    // --- Emergency stop check ---
-    lastDistanceCm = getDistance();
-
-    // movingForward: at least one wheel driving forward
-    bool movingForward = (targetLeftSpeed > 0 || targetRightSpeed > 0);
-    // tooClose: valid reading (>0, since 0 = timeout/out-of-range) AND below threshold
-    bool tooClose = (lastDistanceCm > 0 && lastDistanceCm < stopDistanceCm);
-
-    if (movingForward && tooClose) {
-      doEstop("front", lastDistanceCm);
-    }
-
-    // --- Acceleration ramping with tilt protection ---
-    if (mpuPresent) {
-      MPUData mpu = getMPUData();
-      if (mpu.valid) {
-        // Calculate pitch from accelerometer
-        // Positive pitch = tilting forward (front-heavy)
-        float pitch = atan2((float)mpu.ax, (float)mpu.az) * 180.0 / PI;
-
-        // If tilting forward beyond threshold, don't allow further forward acceleration
-        if (pitch > tipThresholdDeg) {
-          if (targetLeftSpeed > currentLeftSpeed) targetLeftSpeed = currentLeftSpeed;
-          if (targetRightSpeed > currentRightSpeed) targetRightSpeed = currentRightSpeed;
-        }
-        // If tilting backward beyond threshold, don't allow further backward acceleration
-        if (pitch < -tipThresholdDeg) {
-          if (targetLeftSpeed < currentLeftSpeed) targetLeftSpeed = currentLeftSpeed;
-          if (targetRightSpeed < currentRightSpeed) targetRightSpeed = currentRightSpeed;
-        }
-      }
-    }
 
     // Ramp current speed toward target
     currentLeftSpeed += constrain(targetLeftSpeed - currentLeftSpeed, -maxAccelPerTick, maxAccelPerTick);
     currentRightSpeed += constrain(targetRightSpeed - currentRightSpeed, -maxAccelPerTick, maxAccelPerTick);
 
-    // --- Apply motor output ---
+    // Apply motor output
     tankDrive(currentLeftSpeed, currentRightSpeed);
   }
 
@@ -245,34 +200,11 @@ void loop()
         bufferIndex = 0;
       }
     }
-    else if (bufferIndex < 63)
+    else if (bufferIndex < 127)
     {
       inputBuffer[bufferIndex++] = c;
     }
   }
-}
-
-// Emergency stop helper - used by both real estop and test command
-void doEstop(const char *source, int dist) {
-  targetLeftSpeed = 0;
-  targetRightSpeed = 0;
-  currentLeftSpeed = 0;
-  currentRightSpeed = 0;
-  stop();
-
-  lastEstopMs = millis();
-  estopCount++;
-  strncpy(estopSource, source, sizeof(estopSource) - 1);
-  estopSource[sizeof(estopSource) - 1] = '\0';
-
-  // Emit estop event
-  Serial.print("{\"estop\":true,\"source\":\"");
-  Serial.print(estopSource);
-  Serial.print("\",\"dist\":");
-  Serial.print(dist);
-  Serial.print(",\"ts\":");
-  Serial.print(lastEstopMs);
-  Serial.println("}");
 }
 
 // Helper to extract integer value from JSON field
@@ -353,17 +285,11 @@ void processCommand(const char *cmd)
     Serial.println("{\"cmd\":\"stop\"}");
     break;
   case 7: // Tank control: D1=left(-255 to 255), D2=right(-255 to 255)
-  {
     targetLeftSpeed = d1;
     targetRightSpeed = d2;
     lastMotorCommand = millis();
-    Serial.print("{\"tank\":[");
-    Serial.print(d1);
-    Serial.print(",");
-    Serial.print(d2);
-    Serial.println("]}");
+    // No serial ack — this fires at 10Hz and would saturate the TX line
     break;
-  }
   case 8: // Set default speed
     motorSpeed = constrain(d1, 0, 255);
     Serial.print("{\"speed\":");
@@ -372,8 +298,9 @@ void processCommand(const char *cmd)
     break;
 
   // === Sensors ===
-  case 10: // Get distance (cached from safety loop — avoids TRIG/ECHO conflict)
+  case 10: // Get distance (fresh read)
   {
+    lastDistanceCm = getDistance();
     Serial.print("{\"distance\":");
     Serial.print(lastDistanceCm);
     Serial.println("}");
@@ -468,39 +395,27 @@ void processCommand(const char *cmd)
     break;
 
   // === Status ===
-  case 100: // Get all sensors (uses cached distance from safety loop)
+  case 100: // Get all sensors
   {
     unsigned long startTime = micros();
     unsigned long t = millis();
+    lastDistanceCm = getDistance();
     MPUData mpu = getMPUData();
     float batt = getBatteryVoltage();
     unsigned long execTime = micros() - startTime;
 
-    Serial.print("{\"ts\":");
-    Serial.print(t);
-    Serial.print(",\"execUs\":");
-    Serial.print(execTime);
-    Serial.print(",\"dist_f\":");
-    Serial.print(lastDistanceCm);
-    Serial.print(",\"accel\":[");
-    Serial.print(mpu.ax);
-    Serial.print(",");
-    Serial.print(mpu.ay);
-    Serial.print(",");
-    Serial.print(mpu.az);
-    Serial.print("],\"gyro\":[");
-    Serial.print(mpu.gx);
-    Serial.print(",");
-    Serial.print(mpu.gy);
-    Serial.print(",");
-    Serial.print(mpu.gz);
-    Serial.print("],\"temp\":");
-    Serial.print(mpu.tempC, 1);
-    Serial.print(",\"battery\":");
-    Serial.print(batt, 2);
-    Serial.print(",\"mpuValid\":");
-    Serial.print(mpu.valid ? 1 : 0);
-    Serial.println("}");
+    char tempStr[8], battStr[8];
+    dtostrf(mpu.tempC, 1, 1, tempStr);
+    dtostrf(batt, 1, 2, battStr);
+
+    char buf[200];
+    snprintf(buf, sizeof(buf),
+      "{\"ts\":%lu,\"execUs\":%lu,\"dist_f\":%d,\"accel\":[%d,%d,%d],\"gyro\":[%d,%d,%d],\"temp\":%s,\"battery\":%s,\"mpuValid\":%d}",
+      t, execTime, lastDistanceCm,
+      mpu.ax, mpu.ay, mpu.az,
+      mpu.gx, mpu.gy, mpu.gz,
+      tempStr, battStr, mpu.valid ? 1 : 0);
+    Serial.println(buf);
     break;
   }
   case 101: // Get current state
@@ -535,19 +450,9 @@ void processCommand(const char *cmd)
     Serial.print(BATTERY_DIVIDER_RATIO, 3);
     Serial.print(",\"mpuPresent\":");
     Serial.print(mpuPresent ? 1 : 0);
-    Serial.print(",\"safety\":{\"stopDist\":");
-    Serial.print(stopDistanceCm);
     Serial.print(",\"maxAccel\":");
     Serial.print(maxAccelPerTick);
-    Serial.print(",\"tipDeg\":");
-    Serial.print((int)tipThresholdDeg);
-    Serial.print("},\"estop\":{\"lastMs\":");
-    Serial.print(lastEstopMs);
-    Serial.print(",\"count\":");
-    Serial.print(estopCount);
-    Serial.print(",\"source\":\"");
-    Serial.print(estopSource);
-    Serial.print("\"},\"stream\":");
+    Serial.print(",\"stream\":");
     Serial.print(streamIntervalMs);
     Serial.println("}");
     break;
@@ -568,24 +473,14 @@ void processCommand(const char *cmd)
     Serial.println("}");
     break;
 
-  case 104: // Set safety config: D1=stopDistanceCm, D2=maxAccelPerTick, D3=tipThresholdDeg
+  case 104: // Set acceleration: D2=maxAccelPerTick
   {
-    if (d1 > 0) stopDistanceCm = d1;
     if (d2 > 0) maxAccelPerTick = d2;
-    if (d3 > 0) tipThresholdDeg = (float)d3;
-    Serial.print("{\"safety\":{\"stopDist\":");
-    Serial.print(stopDistanceCm);
-    Serial.print(",\"maxAccel\":");
+    Serial.print("{\"maxAccel\":");
     Serial.print(maxAccelPerTick);
-    Serial.print(",\"tipDeg\":");
-    Serial.print((int)tipThresholdDeg);
-    Serial.println("}}");
+    Serial.println("}");
     break;
   }
-
-  case 105: // Emergency stop test
-    doEstop("test", 0);
-    break;
 
   default:
     Serial.print("{\"error\":\"unknown cmd ");
@@ -681,34 +576,13 @@ int getDistance()
   delayMicroseconds(10);
   digitalWrite(TRIG, LOW);
 
-  // measure echo duration (30ms timeout)
-  long duration = pulseIn(ECHO, HIGH, 30000);
+  // measure echo duration (10ms timeout ≈ 174cm max range)
+  long duration = pulseIn(ECHO, HIGH, 10000);
 
   // 0 duration = timeout (nothing detected / out of range)
-  // This returns 0, which the estop check treats as "no obstacle"
   int distance = duration / 58;
 
   return distance;
-}
-
-void forward(int speed)
-{
-  tankDrive(speed, speed);
-}
-
-void backward(int speed)
-{
-  tankDrive(-speed, -speed);
-}
-
-void turnLeft(int speed)
-{
-  tankDrive(-speed, speed);
-}
-
-void turnRight(int speed)
-{
-  tankDrive(speed, -speed);
 }
 
 void stop()
