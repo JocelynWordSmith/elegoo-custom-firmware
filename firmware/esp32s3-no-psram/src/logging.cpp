@@ -20,7 +20,9 @@ void addLog(const char *message)
     log_count++;
   }
 
-  // also print to serial
+  // also print to serial — prefix with [DBG] so the serial relay can
+  // distinguish firmware debug output from shell responses
+  Serial.print("[DBG] ");
   Serial.println(message);
 }
 

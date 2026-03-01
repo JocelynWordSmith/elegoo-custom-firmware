@@ -4,6 +4,8 @@
 #include "esp_http_server.h"
 #include "http_server.h"
 #include "camera_handlers.h"
+#include "hid_handlers.h"
+#include "serial_relay.h"
 #include "logging.h"
 
 extern const char *FIRMWARE_VERSION;
@@ -29,13 +31,24 @@ static esp_err_t indexHandler(httpd_req_t *req)
   const char *html =
       "<html><body>"
       "<h1>ESP32-S3 Camera Server</h1>"
-      "<p>Endpoints:</p>"
-      "<ul>"
-      "<li><a href='/info'>/info</a> - Firmware, WiFi, camera info</li>"
-      "<li><a href='/status'>/status</a> - Uptime, heap, RSSI</li>"
-      "<li><a href='/capture'>/capture</a> - Single JPEG image</li>"
+      "<p><b>Camera</b></p><ul>"
+      "<li><a href='/capture'>/capture</a> - Single JPEG snapshot</li>"
       "<li><a href='/stream'>/stream</a> - MJPEG stream</li>"
       "<li>/control?var=X&val=Y - Camera settings</li>"
+      "</ul>"
+      "<p><b>HID (USB keyboard + mouse)</b></p><ul>"
+      "<li>POST /hid/type - Body: raw text to type (plain text)</li>"
+      "<li>/hid/key?key=enter - Send key (dash-separated combos: ctrl-c, alt-f4)</li>"
+      "<li>/hid/mouse?dx=0&dy=0&click=left&scroll=0 - Mouse movement/click</li>"
+      "</ul>"
+      "<p><b>Terminal relay (USB serial &lt;-&gt; WiFi)</b></p><ul>"
+      "<li>POST /terminal/write - Body: text to send to /dev/ttyACM0 on host</li>"
+      "<li><a href='/terminal/read'>/terminal/read</a> - Read buffered serial input (clears buffer)</li>"
+      "<li>On Ubuntu: <code>socat /dev/ttyACM0,raw,echo=0 EXEC:'bash -i',pty,setsid,ctty</code></li>"
+      "</ul>"
+      "<p><b>System</b></p><ul>"
+      "<li><a href='/info'>/info</a> - Firmware, WiFi, camera info</li>"
+      "<li><a href='/status'>/status</a> - Uptime, heap, RSSI</li>"
       "<li><a href='/logs'>/logs</a> - Recent log messages</li>"
       "<li>/restart - Reboot ESP32</li>"
       "</ul>"
@@ -144,7 +157,7 @@ void startServer()
   config.recv_wait_timeout = 5; // 5 second timeout
   config.send_wait_timeout = 5;
   config.lru_purge_enable = true; // close oldest connection when out of sockets
-  config.max_uri_handlers = 10;
+  config.max_uri_handlers = 14;
 
   if (httpd_start(&server, &config) == ESP_OK)
   {
@@ -204,6 +217,43 @@ void startServer()
         .handler = restartHandler,
         .user_ctx = NULL};
     httpd_register_uri_handler(server, &restart_uri);
+
+    // HID endpoints
+    httpd_uri_t hid_type_uri = {
+        .uri = "/hid/type",
+        .method = HTTP_POST,
+        .handler = hidTypeHandler,
+        .user_ctx = NULL};
+    httpd_register_uri_handler(server, &hid_type_uri);
+
+    httpd_uri_t hid_key_uri = {
+        .uri = "/hid/key",
+        .method = HTTP_GET,
+        .handler = hidKeyHandler,
+        .user_ctx = NULL};
+    httpd_register_uri_handler(server, &hid_key_uri);
+
+    httpd_uri_t hid_mouse_uri = {
+        .uri = "/hid/mouse",
+        .method = HTTP_GET,
+        .handler = hidMouseHandler,
+        .user_ctx = NULL};
+    httpd_register_uri_handler(server, &hid_mouse_uri);
+
+    // Serial relay endpoints
+    httpd_uri_t terminal_write_uri = {
+        .uri = "/terminal/write",
+        .method = HTTP_POST,
+        .handler = terminalWriteHandler,
+        .user_ctx = NULL};
+    httpd_register_uri_handler(server, &terminal_write_uri);
+
+    httpd_uri_t terminal_read_uri = {
+        .uri = "/terminal/read",
+        .method = HTTP_GET,
+        .handler = terminalReadHandler,
+        .user_ctx = NULL};
+    httpd_register_uri_handler(server, &terminal_read_uri);
 
     addLog("HTTP server started on port 80");
   }

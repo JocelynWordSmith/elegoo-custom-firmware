@@ -6,6 +6,8 @@
 #include "credentials.h"
 #include "logging.h"
 #include "http_server.h"
+#include "hid_handlers.h"
+#include "serial_relay.h"
 
 const char *FIRMWARE_VERSION = "0.0.1";
 
@@ -13,6 +15,10 @@ void setup()
 {
   Serial.begin(115200);
   delay(1000); // brief delay for USB enumeration
+
+  // Initialize HID before any other USB activity so keyboard and mouse
+  // are registered with TinyUSB before the first USB enumeration.
+  initHID();
 
   addLog("ESP32-S3 starting...");
   Serial.print("CPU Frequency: ");
@@ -136,6 +142,8 @@ void setup()
 
   ArduinoOTA.begin();
   addLog("OTA initialized");
+
+  initSerialRelay();
   char buf[48];
   snprintf(buf, sizeof(buf), "FIRMWARE_VERSION: %s", FIRMWARE_VERSION);
   addLog(buf);
@@ -148,6 +156,7 @@ static const unsigned long WIFI_CHECK_INTERVAL = 10000;  // check every 10s
 void loop()
 {
   ArduinoOTA.handle();
+  pollSerialRelay();
 
   // WiFi auto-reconnect
   unsigned long now = millis();
