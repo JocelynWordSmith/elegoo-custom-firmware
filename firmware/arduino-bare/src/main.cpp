@@ -1,19 +1,5 @@
 #include <Arduino.h>
-#include <Wire.h>
 #include <FastLED.h>
-
-// custom datatypes
-struct MPUData
-{
-  int16_t ax; // Accelerometer
-  int16_t ay;
-  int16_t az;
-  float tempC; // Temperature
-  int16_t gx;  // Gyroscope
-  int16_t gy;
-  int16_t gz;
-  bool valid;  // true if read succeeded
-};
 
 //
 // Motor pins (TB6612FNG)
@@ -39,10 +25,6 @@ const int ECHO = 12; // Echo (input)
 // Voltage divider ratio assumed 1:2 (needs calibration)
 const int BATTERY_PIN = A3;
 float BATTERY_DIVIDER_RATIO = 2.0; // adjust based on actual divider
-//
-// MPU-6050 (I2C)
-//
-const int MPU_ADDR = 0x68;
 //
 // RGB LED
 //
@@ -74,9 +56,6 @@ uint8_t currentBrightness = 50;
 unsigned long lastMotorCommand = 0;
 unsigned long watchdogTimeout = 1000; // 1s default — allows ~10 missed cmds at 10Hz
 
-// MPU-6050 status
-bool mpuPresent = false;
-
 // Acceleration curve config
 int maxAccelPerTick = 20;         // max speed change per 20ms tick (0-255 range)
 
@@ -95,8 +74,6 @@ unsigned long lastStreamTime = 0;
 void stop();
 void tankDrive(int leftSpeed, int rightSpeed);
 int getDistance();
-bool testMPU();
-MPUData getMPUData();
 float getBatteryVoltage();
 void processCommand(const char *cmd);
 int getJsonInt(const char *cmd, const char *field, int defaultVal = 0);
@@ -107,34 +84,6 @@ void setup()
   // setup fastled
   FastLED.addLeds<WS2812B, LED_DATA_PIN, GRB>(leds, NUM_LEDS);
   FastLED.setBrightness(50); // 0-255
-
-  // Initialize I2C
-  Wire.begin();
-
-  // Test if MPU-6050 is present
-  mpuPresent = testMPU();
-
-  if (mpuPresent) {
-    // Wake up MPU-6050 (it starts in sleep mode)
-    Wire.beginTransmission(MPU_ADDR);
-    Wire.write(0x6B); // PWR_MGMT_1 register
-    Wire.write(0);    // wake up (set to 0)
-    Wire.endTransmission(true);
-
-    // Flash LED green to indicate MPU is ready
-    leds[0] = CRGB(0, 255, 0);
-    FastLED.show();
-    delay(200);
-    leds[0] = CRGB(0, 0, 0);
-    FastLED.show();
-  } else {
-    // Flash LED red to indicate MPU not found
-    leds[0] = CRGB(255, 0, 0);
-    FastLED.show();
-    delay(200);
-    leds[0] = CRGB(0, 0, 0);
-    FastLED.show();
-  }
 
   // Set all motor pins as outputs
   pinMode(PWMA, OUTPUT);
@@ -306,26 +255,6 @@ void processCommand(const char *cmd)
     Serial.println("}");
     break;
   }
-  case 12: // Get MPU data
-  {
-    MPUData mpu = getMPUData();
-    Serial.print("{\"accel\":[");
-    Serial.print(mpu.ax);
-    Serial.print(",");
-    Serial.print(mpu.ay);
-    Serial.print(",");
-    Serial.print(mpu.az);
-    Serial.print("],\"temp\":");
-    Serial.print(mpu.tempC, 2);
-    Serial.print(",\"gyro\":[");
-    Serial.print(mpu.gx);
-    Serial.print(",");
-    Serial.print(mpu.gy);
-    Serial.print(",");
-    Serial.print(mpu.gz);
-    Serial.println("]}");
-    break;
-  }
   case 13: // Get battery voltage
   {
     float voltage = getBatteryVoltage();
@@ -400,21 +329,16 @@ void processCommand(const char *cmd)
     unsigned long startTime = micros();
     unsigned long t = millis();
     lastDistanceCm = getDistance();
-    MPUData mpu = getMPUData();
     float batt = getBatteryVoltage();
     unsigned long execTime = micros() - startTime;
 
-    char tempStr[8], battStr[8];
-    dtostrf(mpu.tempC, 1, 1, tempStr);
+    char battStr[8];
     dtostrf(batt, 1, 2, battStr);
 
-    char buf[200];
+    char buf[128];
     snprintf(buf, sizeof(buf),
-      "{\"ts\":%lu,\"execUs\":%lu,\"dist_f\":%d,\"accel\":[%d,%d,%d],\"gyro\":[%d,%d,%d],\"temp\":%s,\"battery\":%s,\"mpuValid\":%d}",
-      t, execTime, lastDistanceCm,
-      mpu.ax, mpu.ay, mpu.az,
-      mpu.gx, mpu.gy, mpu.gz,
-      tempStr, battStr, mpu.valid ? 1 : 0);
+      "{\"ts\":%lu,\"execUs\":%lu,\"dist_f\":%d,\"battery\":%s}",
+      t, execTime, lastDistanceCm, battStr);
     Serial.println(buf);
     break;
   }
@@ -448,8 +372,6 @@ void processCommand(const char *cmd)
     Serial.print(rightMotorBias, 2);
     Serial.print("],\"batteryRatio\":");
     Serial.print(BATTERY_DIVIDER_RATIO, 3);
-    Serial.print(",\"mpuPresent\":");
-    Serial.print(mpuPresent ? 1 : 0);
     Serial.print(",\"maxAccel\":");
     Serial.print(maxAccelPerTick);
     Serial.print(",\"stream\":");
@@ -487,75 +409,6 @@ void processCommand(const char *cmd)
     Serial.print(n);
     Serial.println("\"}");
   }
-}
-
-bool testMPU()
-{
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x75); // WHO_AM_I register
-  if (Wire.endTransmission(false) != 0) {
-    return false; // I2C error
-  }
-
-  if (Wire.requestFrom(MPU_ADDR, 1, true) != 1) {
-    return false; // Failed to read
-  }
-
-  uint8_t whoami = Wire.read();
-  return (whoami == 0x68); // MPU-6050 device ID
-}
-
-MPUData getMPUData()
-{
-  MPUData result = {0, 0, 0, 0.0, 0, 0, 0, false};
-
-  if (!mpuPresent) {
-    return result;
-  }
-
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x3B); // starting register (ACCEL_XOUT_H)
-  if (Wire.endTransmission(false) != 0) {
-    return result; // I2C error
-  }
-
-  if (Wire.requestFrom(MPU_ADDR, 14, true) != 14) {
-    return result; // Failed to read all bytes
-  }
-
-  int16_t high, low;
-
-  high = Wire.read();
-  low = Wire.read();
-  result.ax = (high << 8) | low;
-
-  high = Wire.read();
-  low = Wire.read();
-  result.ay = (high << 8) | low;
-
-  high = Wire.read();
-  low = Wire.read();
-  result.az = (high << 8) | low;
-
-  high = Wire.read();
-  low = Wire.read();
-  int16_t temperature = (high << 8) | low;
-  result.tempC = (temperature / 340.0) + 36.53;
-
-  high = Wire.read();
-  low = Wire.read();
-  result.gx = (high << 8) | low;
-
-  high = Wire.read();
-  low = Wire.read();
-  result.gy = (high << 8) | low;
-
-  high = Wire.read();
-  low = Wire.read();
-  result.gz = (high << 8) | low;
-
-  result.valid = true;
-  return result;
 }
 
 float getBatteryVoltage()
