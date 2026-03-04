@@ -11,7 +11,6 @@
 *.a
 CMakeFiles/
 cmake_install.cmake
-Makefile
 
 # OS
 .DS_Store
@@ -60,6 +59,11 @@ src/**/sdkconfig.old
 credentials.h
 **/credentials.h
 
+# Python
+__pycache__/
+*.pyc
+
 # local reference files and notes
 .local
 *.code-workspace
+.venv

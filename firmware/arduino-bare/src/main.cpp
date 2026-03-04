@@ -1,5 +1,8 @@
 #include <Arduino.h>
 #include <FastLED.h>
+#include "robot_logic.h"
+
+#define FW_VERSION "0.1.0"
 
 //
 // Motor pins (TB6612FNG)
@@ -53,7 +56,10 @@ uint8_t currentLedB = 0;
 uint8_t currentBrightness = 50;
 
 // Motor watchdog
-unsigned long lastMotorCommand = 0;
+unsigned long lastMotorCommand = 0; // initialized to millis() in setup()
+
+// Battery EMA filter
+float batterySmoothed = -1.0; // sentinel: first read initializes
 unsigned long watchdogTimeout = 1000; // 1s default — allows ~10 missed cmds at 10Hz
 
 // Acceleration curve config
@@ -76,7 +82,6 @@ void tankDrive(int leftSpeed, int rightSpeed);
 int getDistance();
 float getBatteryVoltage();
 void processCommand(const char *cmd);
-int getJsonInt(const char *cmd, const char *field, int defaultVal = 0);
 
 void setup()
 {
@@ -97,6 +102,8 @@ void setup()
 
   pinMode(TRIG, OUTPUT);
   pinMode(ECHO, INPUT);
+
+  lastMotorCommand = millis();
 }
 
 char inputBuffer[128];
@@ -109,8 +116,8 @@ void loop()
     lastSafetyTick = millis();
 
     // Ramp current speed toward target
-    currentLeftSpeed += constrain(targetLeftSpeed - currentLeftSpeed, -maxAccelPerTick, maxAccelPerTick);
-    currentRightSpeed += constrain(targetRightSpeed - currentRightSpeed, -maxAccelPerTick, maxAccelPerTick);
+    currentLeftSpeed = rampSpeed(currentLeftSpeed, targetLeftSpeed, maxAccelPerTick);
+    currentRightSpeed = rampSpeed(currentRightSpeed, targetRightSpeed, maxAccelPerTick);
 
     // Apply motor output
     tankDrive(currentLeftSpeed, currentRightSpeed);
@@ -156,23 +163,12 @@ void loop()
   }
 }
 
-// Helper to extract integer value from JSON field
-int getJsonInt(const char *cmd, const char *field, int defaultVal)
-{
-  const char *found = strstr(cmd, field);
-  if (!found)
-    return defaultVal;
-
-  const char *start = found + strlen(field);
-  return atoi(start);
-}
-
 void processCommand(const char *cmd)
 {
   int n = getJsonInt(cmd, "\"N\":", -1);
   if (n == -1)
   {
-    Serial.println("{\"error\":\"no N field\"}");
+    Serial.println("{\"err\":\"no N\"}");
     return;
   }
 
@@ -188,14 +184,14 @@ void processCommand(const char *cmd)
     break;
 
   // === Motor Control ===
-  // All motor commands now set TARGET speed; the safety loop ramps and applies.
+  // All motor commands set TARGET speed; the safety loop ramps and applies.
   case 2: // Forward (D1=speed, optional)
   {
     int spd = d1 > 0 ? d1 : motorSpeed;
     targetLeftSpeed = spd;
     targetRightSpeed = spd;
     lastMotorCommand = millis();
-    Serial.println("{\"cmd\":\"forward\"}");
+    Serial.println("{\"cmd\":\"fwd\"}");
     break;
   }
   case 3: // Backward
@@ -204,7 +200,7 @@ void processCommand(const char *cmd)
     targetLeftSpeed = -spd;
     targetRightSpeed = -spd;
     lastMotorCommand = millis();
-    Serial.println("{\"cmd\":\"backward\"}");
+    Serial.println("{\"cmd\":\"bwd\"}");
     break;
   }
   case 4: // Turn left
@@ -240,30 +236,32 @@ void processCommand(const char *cmd)
     // No serial ack — this fires at 10Hz and would saturate the TX line
     break;
   case 8: // Set default speed
+  {
     motorSpeed = constrain(d1, 0, 255);
-    Serial.print("{\"speed\":");
-    Serial.print(motorSpeed);
-    Serial.println("}");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "{\"s\":%d}", motorSpeed);
+    Serial.println(buf);
     break;
+  }
 
   // === Sensors ===
   case 10: // Get distance (fresh read)
   {
     lastDistanceCm = getDistance();
-    Serial.print("{\"distance\":");
-    Serial.print(lastDistanceCm);
-    Serial.println("}");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "{\"d\":%d}", lastDistanceCm);
+    Serial.println(buf);
     break;
   }
   case 13: // Get battery voltage
   {
     float voltage = getBatteryVoltage();
     int raw = analogRead(BATTERY_PIN);
-    Serial.print("{\"battery\":");
-    Serial.print(voltage, 2);
-    Serial.print(",\"raw\":");
-    Serial.print(raw);
-    Serial.println("}");
+    char vStr[8];
+    dtostrf(voltage, 1, 2, vStr);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "{\"b\":%s,\"raw\":%d}", vStr, raw);
+    Serial.println(buf);
     break;
   }
   case 14: // Calibrate battery: D1=actual voltage * 100 (e.g., 740 = 7.40V)
@@ -273,17 +271,13 @@ void processCommand(const char *cmd)
     float adcVoltage = raw * (5.0 / 1023.0);
     if (adcVoltage > 0.1) {
       BATTERY_DIVIDER_RATIO = actualVoltage / adcVoltage;
-      Serial.print("{\"calibrated_ratio\":");
-      Serial.print(BATTERY_DIVIDER_RATIO, 3);
-      Serial.print(",\"actual\":");
-      Serial.print(actualVoltage, 2);
-      Serial.print(",\"adc\":");
-      Serial.print(adcVoltage, 2);
-      Serial.print(",\"raw\":");
-      Serial.print(raw);
-      Serial.println("}");
+      char brStr[8];
+      dtostrf(BATTERY_DIVIDER_RATIO, 1, 3, brStr);
+      char buf[24];
+      snprintf(buf, sizeof(buf), "{\"br\":%s}", brStr);
+      Serial.println(buf);
     } else {
-      Serial.println("{\"error\":\"voltage too low\"}");
+      Serial.println("{\"err\":\"voltage too low\"}");
     }
     break;
   }
@@ -291,37 +285,38 @@ void processCommand(const char *cmd)
   {
     leftMotorBias = constrain(d1, 80, 120) / 100.0;
     rightMotorBias = constrain(d2, 80, 120) / 100.0;
-    Serial.print("{\"motor_bias\":[");
-    Serial.print(leftMotorBias, 2);
-    Serial.print(",");
-    Serial.print(rightMotorBias, 2);
-    Serial.println("]}");
+    char lStr[8], rStr[8];
+    dtostrf(leftMotorBias, 1, 2, lStr);
+    dtostrf(rightMotorBias, 1, 2, rStr);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "{\"mb\":[%s,%s]}", lStr, rStr);
+    Serial.println(buf);
     break;
   }
 
   // === LED ===
   case 20: // Set LED color: D1=R, D2=G, D3=B (0-255 each)
+  {
     currentLedR = d1;
     currentLedG = d2;
     currentLedB = d3;
     leds[0] = CRGB(d1, d2, d3);
     FastLED.show();
-    Serial.print("{\"led\":[");
-    Serial.print(d1);
-    Serial.print(",");
-    Serial.print(d2);
-    Serial.print(",");
-    Serial.print(d3);
-    Serial.println("]}");
+    char buf[24];
+    snprintf(buf, sizeof(buf), "{\"l\":[%d,%d,%d]}", d1, d2, d3);
+    Serial.println(buf);
     break;
+  }
   case 21: // Set LED brightness: D1=brightness (0-255)
+  {
     currentBrightness = constrain(d1, 0, 255);
     FastLED.setBrightness(currentBrightness);
     FastLED.show();
-    Serial.print("{\"brightness\":");
-    Serial.print(d1);
-    Serial.println("}");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "{\"B\":%u}", currentBrightness);
+    Serial.println(buf);
     break;
+  }
 
   // === Status ===
   case 100: // Get all sensors
@@ -335,107 +330,109 @@ void processCommand(const char *cmd)
     char battStr[8];
     dtostrf(batt, 1, 2, battStr);
 
-    char buf[128];
+    char buf[64];
     snprintf(buf, sizeof(buf),
-      "{\"ts\":%lu,\"execUs\":%lu,\"dist_f\":%d,\"battery\":%s}",
+      "{\"t\":%lu,\"u\":%lu,\"d\":%d,\"b\":%s}",
       t, execTime, lastDistanceCm, battStr);
     Serial.println(buf);
     break;
   }
   case 101: // Get current state
   {
-    Serial.print("{\"ts\":");
-    Serial.print(millis());
-    Serial.print(",\"motors\":[");
-    Serial.print(currentLeftSpeed);
-    Serial.print(",");
-    Serial.print(currentRightSpeed);
-    Serial.print("],\"targets\":[");
-    Serial.print(targetLeftSpeed);
-    Serial.print(",");
-    Serial.print(targetRightSpeed);
-    Serial.print("],\"led\":[");
-    Serial.print(currentLedR);
-    Serial.print(",");
-    Serial.print(currentLedG);
-    Serial.print(",");
-    Serial.print(currentLedB);
-    Serial.print("],\"brightness\":");
-    Serial.print(currentBrightness);
-    Serial.print(",\"speed\":");
-    Serial.print(motorSpeed);
-    Serial.print(",\"watchdog\":");
-    Serial.print(watchdogTimeout);
-    Serial.print(",\"motorBias\":[");
-    Serial.print(leftMotorBias, 2);
-    Serial.print(",");
-    Serial.print(rightMotorBias, 2);
-    Serial.print("],\"batteryRatio\":");
-    Serial.print(BATTERY_DIVIDER_RATIO, 3);
-    Serial.print(",\"maxAccel\":");
-    Serial.print(maxAccelPerTick);
-    Serial.print(",\"stream\":");
-    Serial.print(streamIntervalMs);
-    Serial.println("}");
+    char lbStr[8], rbStr[8], brStr[8];
+    dtostrf(leftMotorBias, 1, 2, lbStr);
+    dtostrf(rightMotorBias, 1, 2, rbStr);
+    dtostrf(BATTERY_DIVIDER_RATIO, 1, 3, brStr);
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+      "{\"t\":%lu,\"M\":[%d,%d],\"T\":[%d,%d],\"l\":[%u,%u,%u],\"B\":%u,"
+      "\"s\":%d,\"w\":%lu,\"mb\":[%s,%s],\"br\":%s,\"ma\":%d,\"st\":%lu}",
+      millis(),
+      currentLeftSpeed, currentRightSpeed,
+      targetLeftSpeed, targetRightSpeed,
+      currentLedR, currentLedG, currentLedB,
+      currentBrightness,
+      motorSpeed,
+      watchdogTimeout,
+      lbStr, rbStr,
+      brStr,
+      maxAccelPerTick,
+      streamIntervalMs);
+    Serial.println(buf);
     break;
   }
-  case 102: // Set watchdog timeout: D1=timeout_ms (0=disable)
-    watchdogTimeout = d1;
-    Serial.print("{\"watchdog\":");
-    Serial.print(watchdogTimeout);
-    Serial.println("}");
+  case 102: // Set watchdog timeout: D1=timeout_ms (0=disable, max 30s)
+  {
+    watchdogTimeout = (unsigned long)constrain(d1, 0, 30000);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "{\"w\":%lu}", watchdogTimeout);
+    Serial.println(buf);
     break;
-
-  // === New Commands ===
+  }
   case 103: // Set sensor stream interval: D1=interval_ms (0=disable)
+  {
     streamIntervalMs = d1;
     lastStreamTime = millis();
-    Serial.print("{\"stream\":");
-    Serial.print(streamIntervalMs);
-    Serial.println("}");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "{\"st\":%lu}", streamIntervalMs);
+    Serial.println(buf);
     break;
-
-  case 104: // Set acceleration: D2=maxAccelPerTick
+  }
+  case 104: // Set acceleration: D1=maxAccelPerTick
   {
-    if (d2 > 0) maxAccelPerTick = d2;
-    Serial.print("{\"maxAccel\":");
-    Serial.print(maxAccelPerTick);
-    Serial.println("}");
+    if (d1 > 0) maxAccelPerTick = d1;
+    char buf[16];
+    snprintf(buf, sizeof(buf), "{\"ma\":%d}", maxAccelPerTick);
+    Serial.println(buf);
+    break;
+  }
+  case 105: // Get firmware version
+  {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "{\"fv\":\"%s\"}", FW_VERSION);
+    Serial.println(buf);
     break;
   }
 
   default:
-    Serial.print("{\"error\":\"unknown cmd ");
-    Serial.print(n);
-    Serial.println("\"}");
+  {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "{\"err\":\"unknown %d\"}", n);
+    Serial.println(buf);
+  }
   }
 }
 
 float getBatteryVoltage()
 {
   int raw = analogRead(BATTERY_PIN);
-  float adcVoltage = raw * (5.0 / 1023.0);
-  return adcVoltage * BATTERY_DIVIDER_RATIO;
+  float voltage = adcToBatteryVoltage(raw, BATTERY_DIVIDER_RATIO);
+  if (batterySmoothed < 0) {
+    batterySmoothed = voltage;
+  } else {
+    batterySmoothed = 0.1f * voltage + 0.9f * batterySmoothed;
+  }
+  return batterySmoothed;
+}
+
+static int singleSonarReading()
+{
+  digitalWrite(TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+  long duration = pulseIn(ECHO, HIGH, 10000);
+  return pulseToDistanceCm(duration);
 }
 
 int getDistance()
 {
-  // clear trigger
-  digitalWrite(TRIG, LOW);
-  delayMicroseconds(2);
-
-  // send 10 microsecond pulse
-  digitalWrite(TRIG, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG, LOW);
-
-  // measure echo duration (10ms timeout ≈ 174cm max range)
-  long duration = pulseIn(ECHO, HIGH, 10000);
-
-  // 0 duration = timeout (nothing detected / out of range)
-  int distance = duration / 58;
-
-  return distance;
+  // 3-sample median filter for noise reduction
+  int a = singleSonarReading();
+  int b = singleSonarReading();
+  int c = singleSonarReading();
+  return median3(a, b, c);
 }
 
 void stop()
@@ -447,8 +444,8 @@ void stop()
 void tankDrive(int leftSpeed, int rightSpeed)
 {
   // Apply bias correction
-  int leftAdjusted = constrain((int)(leftSpeed * leftMotorBias), -255, 255);
-  int rightAdjusted = constrain((int)(rightSpeed * rightMotorBias), -255, 255);
+  int leftAdjusted = clampMotorSpeed(leftSpeed, leftMotorBias);
+  int rightAdjusted = clampMotorSpeed(rightSpeed, rightMotorBias);
 
   // Left motor
   digitalWrite(AIN1, leftAdjusted >= 0 ? HIGH : LOW);

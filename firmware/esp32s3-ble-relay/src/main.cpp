@@ -17,6 +17,7 @@
 // UART receive buffer (Arduino → BLE)
 static char uartBuf[256];
 static size_t uartBufIdx = 0;
+static bool uartOverflowWarned = false;
 
 static NimBLECharacteristic *pTxChar = nullptr;
 static bool clientConnected = false;
@@ -57,6 +58,10 @@ class RxCallbacks : public NimBLECharacteristicCallbacks
     std::string value = pChar->getValue();
     if (value.length() > 0)
     {
+      // Debug log incoming BLE data
+      Serial.print("BLE -> : ");
+      Serial.println(value.c_str());
+
       // Forward BLE data to Arduino via UART
       Serial1.write((const uint8_t *)value.data(), value.length());
 
@@ -134,15 +139,24 @@ void loop()
         }
 
         // Debug echo
-        Serial.print("→ BLE: ");
+        Serial.print("-> BLE: ");
         Serial.println(uartBuf);
 
         uartBufIdx = 0;
+        uartOverflowWarned = false;
       }
     }
     else if (uartBufIdx < sizeof(uartBuf) - 1)
     {
       uartBuf[uartBufIdx++] = c;
+    }
+    else
+    {
+      if (!uartOverflowWarned)
+      {
+        Serial.println("WARN: UART buf overflow");
+        uartOverflowWarned = true;
+      }
     }
   }
 }
